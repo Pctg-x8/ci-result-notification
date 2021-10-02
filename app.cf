@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CIResultNotificationGHA App Infra Deployment
+
+Parameters:
+  FunctionName:
+    Type: String
+    Default: CIResultNotificationGHA
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      Policies:
+        - PolicyName: LogStream
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource:
+                  - arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:*:*:log-group:/aws/lambda/${FunctionName}:*
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      Description:
+        Notification Sender for GitHub Actions CI
+      Role: !GetAtt Role.Arn
+      Code: ./package.zip
+      Runtime: provided
+      Handler: hello.handler
+      Environment:
+        Variables:
+          RUST_LOG: error
+
+Outputs:
+  FunctionArn:
+    Value: !GetAtt Function.Arn

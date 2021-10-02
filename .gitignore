@@ -1,0 +1,5 @@
+/target
+transformed.cf
+/.secrets
+/src/character/internal.rs
+*.zip
