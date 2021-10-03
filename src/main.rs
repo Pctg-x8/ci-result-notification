@@ -210,13 +210,10 @@ async fn main() -> Result<(), Error> {
     lambda_runtime::run(handler_fn(handler)).await
 }
 async fn handler(e: CIEngineInput, _context: Context) -> Result<ExecutionResult, Error> {
-    report(e, Character::new()).await
+    Ok(report(e, Character::new()).await)
 }
 
-async fn report<C: ReportCharacter>(
-    e: CIEngineInput,
-    character: C,
-) -> Result<ExecutionResult, Error> {
+async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> ExecutionResult {
     let check_title = &e.report_name;
     let succeeded = e.status == "success";
 
@@ -335,46 +332,68 @@ async fn report<C: ReportCharacter>(
         }]
     };
 
-    let postdata_d = serde_json::to_string(
-        &DiscordExecuteWebhookPayload::with_content(&text_d)
-            .override_user(&username, discord_avatar_url)
-            .embeds(embeds),
-    )
-    .expect("Failed to serialize discord webhook payload");
-    let d_post_result = reqwest::Client::new()
-        .post(DISCORD_WEBHOOK_URL)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        )
-        .body(postdata_d)
-        .send()
-        .await;
-    let d_post_result = match d_post_result {
-        Ok(r) => r.text().await,
-        Err(e) => Err(e),
-    };
-    match d_post_result {
-        Ok(e) if !e.is_empty() => log::info!("Discord ExecuteWebhook Response: {}", e),
-        Err(e) => {
-            log::error!("Discord Execute Webhook Failed: {}", e.to_string());
-            return Ok(ExecutionResult {
-                code: e.status().expect("no error?").as_u16() as _,
-                body: Some(e.to_string()),
-            });
-        }
-        _ => (),
-    }
+    let postdata = DiscordExecuteWebhookPayload::with_content(&text_d)
+        .override_user(&username, discord_avatar_url)
+        .embeds(embeds);
+    let discord_post_task = execute_discord_webhook(postdata);
 
-    let postdata = serde_json::to_string(&SlackPostData {
+    let postdata = SlackPostData {
         channel: "#ci-notifications",
         text: &text,
         as_user: false,
         icon_emoji: face,
         username: &username,
         attachments: &attachments,
-    })
-    .expect("Failed to serialize");
+    };
+    let slack_post_task = post_slack_message(postdata);
+
+    let res = tokio::try_join!(discord_post_task, slack_post_task);
+    match res {
+        Ok(_) => ExecutionResult {
+            code: 200,
+            body: None,
+        },
+        Err(e) => {
+            log::error!("Post failed: {}", e.to_string());
+            e.into()
+        }
+    }
+}
+
+enum PostError {
+    SlackRequesting(reqwest::Error),
+    FromSlack(String),
+    DiscordRequesting(reqwest::Error),
+}
+impl std::fmt::Display for PostError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::SlackRequesting(e) => write!(fmt, "Slack requesting failed: {}", e),
+            Self::DiscordRequesting(e) => write!(fmt, "Discord requesting failed: {}", e),
+            Self::FromSlack(e) => write!(fmt, "Slack responded an error: {}", e),
+        }
+    }
+}
+impl From<PostError> for ExecutionResult {
+    fn from(v: PostError) -> Self {
+        match v {
+            PostError::SlackRequesting(e) => ExecutionResult {
+                code: e.status().expect("no error?").as_u16() as _,
+                body: Some(e.to_string()),
+            },
+            PostError::DiscordRequesting(e) => ExecutionResult {
+                code: e.status().expect("no error?").as_u16() as _,
+                body: Some(e.to_string()),
+            },
+            PostError::FromSlack(e) => ExecutionResult {
+                code: 500,
+                body: Some(e),
+            },
+        }
+    }
+}
+
+async fn post_slack_message<'a>(msg: SlackPostData<'a>) -> Result<(), PostError> {
     let mut headers = reqwest::header::HeaderMap::with_capacity(2);
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -384,32 +403,45 @@ async fn report<C: ReportCharacter>(
         reqwest::header::AUTHORIZATION,
         reqwest::header::HeaderValue::from_static(SLACK_AUTH_HEADER),
     );
-    let post_result = reqwest::Client::new()
+
+    let r: SlackPostResult = reqwest::Client::new()
         .post("https://api.slack.com/api/chat.postMessage")
         .headers(headers)
-        .body(postdata)
+        .body(serde_json::to_string(&msg).expect("Failed to serialize slack post request"))
         .send()
-        .await;
-    let post_result = match post_result {
-        Ok(r) => r.json::<SlackPostResult>().await,
-        Err(e) => Err(e),
-    };
+        .await
+        .map_err(PostError::SlackRequesting)?
+        .json()
+        .await
+        .map_err(PostError::SlackRequesting)?;
 
-    match post_result {
-        Ok(r) if r.ok => Ok(ExecutionResult {
-            code: 200,
-            body: None,
-        }),
-        Ok(r) => Ok(ExecutionResult {
-            code: 200,
-            body: Some(r.error.unwrap_or_else(String::new)),
-        }),
-        Err(e) => {
-            log::error!("Slack Post Failed: {}", e.to_string());
-            Ok(ExecutionResult {
-                code: e.status().expect("no error?").as_u16() as _,
-                body: Some(e.to_string()),
-            })
-        }
+    if !r.ok {
+        Err(PostError::FromSlack(r.error.unwrap_or_else(String::new)))
+    } else {
+        Ok(())
     }
+}
+
+async fn execute_discord_webhook<'a>(
+    payload: DiscordExecuteWebhookPayload<'a>,
+) -> Result<(), PostError> {
+    let r = reqwest::Client::new()
+        .post(DISCORD_WEBHOOK_URL)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        )
+        .body(serde_json::to_string(&payload).expect("Failed to serialize discord webhook payload"))
+        .send()
+        .await
+        .map_err(PostError::DiscordRequesting)?
+        .text()
+        .await
+        .map_err(PostError::DiscordRequesting)?;
+
+    if !r.is_empty() {
+        log::info!("Discord ExecuteWebhook Response: {}", r);
+    }
+
+    Ok(())
 }
