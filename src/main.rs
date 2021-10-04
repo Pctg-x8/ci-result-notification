@@ -38,6 +38,12 @@ pub struct ExecutionResult {
     code: u32,
     body: Option<String>,
 }
+impl ExecutionResult {
+    pub const OK: Self = Self {
+        code: 200,
+        body: None,
+    };
+}
 
 #[derive(serde::Serialize)]
 pub struct SlackAttachmentField<'s> {
@@ -226,13 +232,14 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
         number: e.number,
         repo_name,
     };
-    let (message1, message1_d, attachment_color, face, face_ident, state);
+    let (message1, message1_d, attachment_color, embed_color, face, face_ident, state);
     if succeeded {
         message1 = character
             .construct_success_message(&SlackLinkFormatter::new(&build_url_text, &e.build_url));
         message1_d = character
             .construct_success_message(&MarkdownLinkFormatter::new(&build_url_text, &e.build_url));
         attachment_color = "good";
+        embed_color = DISCORD_EMBED_COLOR_GREEN;
         let (f, fi) = character.success_face_icon();
         face = f;
         face_ident = fi;
@@ -243,6 +250,7 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
         message1_d = character
             .construct_failure_message(&MarkdownLinkFormatter::new(&build_url_text, &e.build_url));
         attachment_color = "danger";
+        embed_color = DISCORD_EMBED_COLOR_RED;
         let (f, fi) = character.failure_face_icon();
         face = f;
         face_ident = fi;
@@ -301,36 +309,29 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
         color: attachment_color,
         title: None,
         text: e.support_info.as_deref().map(std::borrow::Cow::Borrowed),
-        fields: if let Some(ref fs) = e.failure_step {
-            vec![
+        fields: match e.failure_step {
+            Some(ref fs) => vec![
                 SlackAttachmentField::new("失敗したジョブ", fs),
                 SlackAttachmentField::new("コミット情報", &commitinfo_full),
-            ]
-        } else {
-            vec![SlackAttachmentField::new("コミット情報", &commitinfo_full)]
+            ],
+            None => vec![SlackAttachmentField::new("コミット情報", &commitinfo_full)],
         },
     }];
-    let embeds = if let Some(ref fs) = e.failure_step {
-        vec![DiscordEmbedObject {
-            color: Some(DISCORD_EMBED_COLOR_RED),
-            description: e.support_info.as_deref(),
-            fields: vec![
+    let embeds = vec![DiscordEmbedObject {
+        color: Some(embed_color),
+        description: e.support_info.as_deref(),
+        fields: match e.failure_step {
+            Some(ref fs) => vec![
                 DiscordEmbedFieldObject::new("失敗したジョブ", fs),
                 DiscordEmbedFieldObject::new("コミット情報", &commitinfo_full_d),
             ],
-            ..Default::default()
-        }]
-    } else {
-        vec![DiscordEmbedObject {
-            color: Some(DISCORD_EMBED_COLOR_GREEN),
-            description: e.support_info.as_deref(),
-            fields: vec![DiscordEmbedFieldObject::new(
+            None => vec![DiscordEmbedFieldObject::new(
                 "コミット情報",
                 &commitinfo_full_d,
             )],
-            ..Default::default()
-        }]
-    };
+        },
+        ..Default::default()
+    }];
 
     let postdata = DiscordExecuteWebhookPayload::with_content(&text_d)
         .override_user(&username, discord_avatar_url)
@@ -349,12 +350,9 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
 
     let res = tokio::try_join!(discord_post_task, slack_post_task);
     match res {
-        Ok(_) => ExecutionResult {
-            code: 200,
-            body: None,
-        },
+        Ok(_) => ExecutionResult::OK,
         Err(e) => {
-            log::error!("Post failed: {}", e.to_string());
+            log::error!("Post failed: {}", e);
             e.into()
         }
     }
