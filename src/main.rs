@@ -66,10 +66,20 @@ impl<'s> SlackAttachmentField<'s> {
 }
 #[derive(serde::Serialize)]
 pub struct SlackAttachment<'s> {
-    color: &'s str,
+    color: Option<&'s str>,
     text: Option<std::borrow::Cow<'s, str>>,
     title: Option<&'s str>,
     fields: Vec<SlackAttachmentField<'s>>,
+}
+impl Default for SlackAttachment<'_> {
+    fn default() -> Self {
+        Self {
+            color: None,
+            text: None,
+            title: None,
+            fields: vec![],
+        }
+    }
 }
 #[derive(serde::Serialize)]
 pub struct SlackPostData<'s> {
@@ -232,14 +242,13 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
         number: e.number,
         repo_name,
     };
-    let (message1, message1_d, attachment_color, embed_color, face, face_ident, state);
+    let (message1, message1_d, color, face, face_ident, state);
     if succeeded {
         message1 = character
             .construct_success_message(&SlackLinkFormatter::new(&build_url_text, &e.build_url));
         message1_d = character
             .construct_success_message(&MarkdownLinkFormatter::new(&build_url_text, &e.build_url));
-        attachment_color = "good";
-        embed_color = DISCORD_EMBED_COLOR_GREEN;
+        color = &ColorCode::GOOD;
         let (f, fi) = character.success_face_icon();
         face = f;
         face_ident = fi;
@@ -249,8 +258,7 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
             .construct_failure_message(&SlackLinkFormatter::new(&build_url_text, &e.build_url));
         message1_d = character
             .construct_failure_message(&MarkdownLinkFormatter::new(&build_url_text, &e.build_url));
-        attachment_color = "danger";
-        embed_color = DISCORD_EMBED_COLOR_RED;
+        color = &ColorCode::DANGER;
         let (f, fi) = character.failure_face_icon();
         face = f;
         face_ident = fi;
@@ -306,8 +314,7 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
     let username = format!("{}{}（{}: {}）", C::NAME, face_ident, check_title, state);
     let discord_avatar_url = avatar_url_map(face);
     let attachments = vec![SlackAttachment {
-        color: attachment_color,
-        title: None,
+        color: Some(color.slack),
         text: e.support_info.as_deref().map(std::borrow::Cow::Borrowed),
         fields: match e.failure_step {
             Some(ref fs) => vec![
@@ -316,9 +323,10 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
             ],
             None => vec![SlackAttachmentField::new("コミット情報", &commitinfo_full)],
         },
+        ..Default::default()
     }];
     let embeds = vec![DiscordEmbedObject {
-        color: Some(embed_color),
+        color: Some(color.discord),
         description: e.support_info.as_deref(),
         fields: match e.failure_step {
             Some(ref fs) => vec![
@@ -356,6 +364,21 @@ async fn report<C: ReportCharacter>(e: CIEngineInput, character: C) -> Execution
             e.into()
         }
     }
+}
+
+pub struct ColorCode {
+    slack: &'static str,
+    discord: u32,
+}
+impl ColorCode {
+    pub const GOOD: Self = Self {
+        slack: "good",
+        discord: DISCORD_EMBED_COLOR_GREEN,
+    };
+    pub const DANGER: Self = Self {
+        slack: "danger",
+        discord: DISCORD_EMBED_COLOR_RED,
+    };
 }
 
 enum PostError {
