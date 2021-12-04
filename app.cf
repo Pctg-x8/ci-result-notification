@@ -41,7 +41,7 @@ Resources:
         Notification Sender for GitHub Actions CI
       Role: !GetAtt Role.Arn
       Code: ./package.zip
-      Runtime: provided
+      Runtime: provided.al2
       Handler: hello.handler
       Environment:
         Variables:
